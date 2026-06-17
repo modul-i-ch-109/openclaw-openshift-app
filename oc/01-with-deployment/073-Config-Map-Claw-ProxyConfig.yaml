@@ -1,0 +1,56 @@
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: claw-proxy-config
+  labels:
+    app: claw
+    app.kubernetes.io/part-of: claw
+data:
+  proxy-config.json: |
+    {
+      "routes": [
+        {
+          "domain": "kubernetes.default.svc:443",
+          "injector": "kubernetes",
+          "kubeconfigPath": "/etc/proxy/credentials/k8s-workspace/kubeconfig",
+          "caCert": "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        },
+        {
+          "domain": "${OPENSHIFT_API_HOST}",
+          "injector": "kubernetes",
+          "kubeconfigPath": "/etc/proxy/credentials/k8s-workspace/kubeconfig",
+          "caCert": "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        },
+        {
+          "domain": "clawhub.ai",
+          "injector": "none"
+        },
+        {
+          "domain": "codeload.github.com",
+          "injector": "none"
+        },
+        {
+          "domain": "github.com",
+          "injector": "none"
+        },
+        {
+          "domain": "hub-ai-foundry-central.cognitiveservices.azure.com",
+          "injector": "bearer",
+          "envVar": "CRED_CUSTOM_LLM"
+        },
+        {
+          "domain": "openrouter.ai",
+          "injector": "none"
+        },
+        {
+          "domain": "raw.githubusercontent.com",
+          "injector": "none",
+          "allowedPaths": ["/BerriAI/litellm/", "/WhiskeySockets/Baileys/"]
+        },
+        {
+          "domain": "registry.npmjs.org",
+          "injector": "none"
+        }
+      ]
+    }

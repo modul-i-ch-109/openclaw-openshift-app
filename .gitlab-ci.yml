@@ -1,0 +1,173 @@
+---
+stages:
+  - deploy
+  - destroy
+
+deploy:openshift:
+  stage: deploy
+  image: quay.io/openshift/origin-cli:latest
+  before_script: []
+  script:
+    - echo "Connecting to OpenShift..."
+    - oc login
+        --token=$OPENSHIFT_TOKEN
+        --server=$OPENSHIFT_SERVER
+        --insecure-skip-tls-verify
+    - oc project $OPENSHIFT_PROJECT
+
+    - echo "Creating workspace-kubeconfig secret..."
+    - |
+      cat > /tmp/kubeconfig << EOF
+      apiVersion: v1
+      kind: Config
+      clusters:
+      - cluster:
+          server: $OPENSHIFT_SERVER
+          insecure-skip-tls-verify: true
+        name: target
+      contexts:
+      - context:
+          cluster: target
+          namespace: $OPENSHIFT_PROJECT
+          user: pipeline
+        name: default
+      current-context: default
+      users:
+      - name: pipeline
+        user:
+          token: $OPENSHIFT_TOKEN
+      EOF
+      oc create secret generic workspace-kubeconfig \
+        --from-file=kubeconfig=/tmp/kubeconfig \
+        --dry-run=client -o yaml \
+        | oc apply -f - \
+        && oc label secret workspace-kubeconfig app=claw --overwrite
+      rm /tmp/kubeconfig
+
+    - echo "Creating claw-gateway-token secret..."
+    - |
+      oc create secret generic claw-gateway-token \
+        --from-literal=token=$OPENCLAW_TOKEN \
+        --dry-run=client -o yaml \
+        | oc apply -f - \
+        && oc label secret claw-gateway-token app=claw --overwrite
+
+    - echo "Creating llm-key secret..."
+    - |
+      oc create secret generic llm-key \
+        --from-literal=custom-api-key=$AZURE_API_KEY \
+        --dry-run=client -o yaml \
+        | oc apply -f - \
+        && oc label secret llm-key app=claw --overwrite
+
+    - echo "Creating claw-proxy-ca secret..."
+    - |
+      echo "$OPENCLAW_PROXY_CA_CRT" > /tmp/ca.crt
+      echo "$OPENCLAW_PROXY_CA_KEY" > /tmp/ca.key
+      oc create secret generic claw-proxy-ca \
+        --from-file=ca.crt=/tmp/ca.crt \
+        --from-file=ca.key=/tmp/ca.key \
+        --dry-run=client -o yaml \
+        | oc apply -f - \
+        && oc label secret claw-proxy-ca \
+           app=claw \
+           app.kubernetes.io/part-of=claw \
+           --overwrite
+      rm /tmp/ca.crt /tmp/ca.key
+    
+    - echo "Substituting variables in ConfigMaps and workspace templates..."
+    - |
+      OPENSHIFT_API_HOST=$(echo $OPENSHIFT_SERVER | sed 's|https://||')
+
+      sed -i \
+        -e "s|\${OPENSHIFT_SERVER}|$OPENSHIFT_SERVER|g" \
+        -e "s|\${OPENSHIFT_PROJECT}|$OPENSHIFT_PROJECT|g" \
+        -e "s|\${OPENSHIFT_API_HOST}|$OPENSHIFT_API_HOST|g" \
+        oc/01-with-deployment/072-Config-Map-Claw-KubeConfig.yaml \
+        oc/01-with-deployment/071-Config-Map-Claw-Config.yaml \
+        oc/01-with-deployment/073-Config-Map-Claw-ProxyConfig.yaml
+
+      for f in openclaw/workspace-templates/*.md; do
+        sed -i \
+          -e "s|\${OPENSHIFT_PROJECT}|$OPENSHIFT_PROJECT|g" \
+          -e "s|\${AGENT_NAME}|$AGENT_NAME|g" \
+          -e "s|\${ORGANISATION_NAME}|$ORGANISATION_NAME|g" \
+          -e "s|\${OPERATOR_NAME}|$OPERATOR_NAME|g" \
+          -e "s|\${AZURE_OPENAI_DEPLOYMENT}|$AZURE_OPENAI_DEPLOYMENT|g" \
+          -e "s|\${AZURE_OPENAI_ENDPOINT}|$AZURE_OPENAI_ENDPOINT|g" \
+          "$f"
+      done
+
+    - echo "Resolving allowed origin..."
+    - |
+      ROUTE_HOST=$(oc get route claw \
+        -n $OPENSHIFT_PROJECT \
+        -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
+      if [ -z "$ROUTE_HOST" ]; then
+        echo "Route 'claw' noch nicht vorhanden, Platzhalter bleibt bis nach erstem Apply"
+        ALLOWED_ORIGIN="ALLOWED_ORIGIN_PLACEHOLDER"
+      else
+        ALLOWED_ORIGIN="https://$ROUTE_HOST"
+        echo "Origin: $ALLOWED_ORIGIN"
+      fi
+
+    - echo "Patching ConfigMap with resolved origin..."
+    - |
+      sed -i "s|ALLOWED_ORIGIN_PLACEHOLDER|$ALLOWED_ORIGIN|g" \
+        oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+
+    - echo "Injecting workspace templates into ConfigMap..."
+    - |
+      for f in openclaw/workspace-templates/*.md; do
+        filename=$(basename "$f")
+        echo "  _ws_${filename}: |" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+        sed 's/^/    /' "$f" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+      done
+
+      for f in sre/runbooks/*.md; do
+        [ -f "$f" ] || continue
+        filename=$(basename "$f")
+        echo "  _ws_runbooks--${filename}: |" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+        sed 's/^/    /' "$f" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+      done
+
+    - echo "Applying all resources..."
+    - oc apply -f oc/01-with-deployment/
+
+    - echo "Resolving origin after apply (Route wird jetzt erstellt falls neu)..."
+    - |
+      if [ "$ALLOWED_ORIGIN" = "ALLOWED_ORIGIN_PLACEHOLDER" ]; then
+        echo "Warte auf Route..."
+        sleep 5
+        ROUTE_HOST=$(oc get route claw -n $OPENSHIFT_PROJECT -o jsonpath='{.spec.host}')
+        ALLOWED_ORIGIN="https://$ROUTE_HOST"
+        echo "Origin nach Apply: $ALLOWED_ORIGIN"
+        sed -i "s|ALLOWED_ORIGIN_PLACEHOLDER|$ALLOWED_ORIGIN|g" \
+          oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+        oc apply -f oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+      fi
+
+    - echo "Restarting deployment to pick up ConfigMap changes..."
+    - oc rollout restart deployment/claw
+
+    - echo "Warte auf Rollout..."
+    - oc rollout status deployment/claw --timeout=3m
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+destroy:openshift:
+  stage: destroy
+  image: quay.io/openshift/origin-cli:latest
+  before_script: []
+  script:
+    - oc login
+        --token=$OPENSHIFT_TOKEN
+        --server=$OPENSHIFT_SERVER
+        --insecure-skip-tls-verify
+    - oc project $OPENSHIFT_PROJECT
+    - oc delete deployment,service,route,secret,configmap,networkpolicy,pvc
+        -l app=claw --ignore-not-found
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual

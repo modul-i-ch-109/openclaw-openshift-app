@@ -1,0 +1,17 @@
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: claw
+  labels:
+    app: claw
+    app.kubernetes.io/part-of: claw
+spec:
+  ports:
+    - name: gateway
+      protocol: TCP
+      port: 18789
+      targetPort: 18789
+  type: ClusterIP
+  selector:
+    app: claw

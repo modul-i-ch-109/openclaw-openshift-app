@@ -1,0 +1,24 @@
+name: Destroy OpenClaw
+
+on:
+  workflow_dispatch:
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/openshift/origin-cli:latest
+
+    steps:
+      - name: Connect to OpenShift
+        run: |
+          oc login \
+            --token=${{ secrets.OPENSHIFT_TOKEN }} \
+            --server=${{ secrets.OPENSHIFT_SERVER }} \
+            --insecure-skip-tls-verify
+          oc project ${{ secrets.OPENSHIFT_PROJECT }}
+
+      - name: Destroy all resources
+        run: |
+          oc delete deployment,service,route,secret,configmap,networkpolicy,pvc \
+            -l app=claw --ignore-not-found

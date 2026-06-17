@@ -1,0 +1,317 @@
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: claw
+  labels:
+    app: claw
+    app.kubernetes.io/part-of: claw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claw
+  template:
+    metadata:
+      labels:
+        app: claw
+    spec:
+      restartPolicy: Always
+      initContainers:
+        - resources:
+            limits:
+              cpu: 50m
+              memory: 32Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+          terminationMessagePath: /dev/termination-log
+          name: init-volume
+          command:
+            - sh
+            - '-c'
+            - mkdir -p -m 0700 /mnt/pvc/home
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: claw-home
+              mountPath: /mnt/pvc
+          terminationMessagePolicy: File
+          image: 'ghcr.io/openclaw/openclaw:2026.6.6'
+        - resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          terminationMessagePath: /dev/termination-log
+          name: init-config
+          command:
+            - node
+            - /config/merge.js
+          env:
+            - name: CLAW_CONFIG_MODE
+              value: merge
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            allowPrivilegeEscalation: false
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: claw-home
+              mountPath: /home/node/.openclaw
+              subPath: home
+            - name: config
+              mountPath: /config
+          terminationMessagePolicy: File
+          image: 'ghcr.io/openclaw/openclaw:2026.6.6'
+        - name: wait-for-proxy
+          image: 'mirror.gcr.io/library/busybox:1.37'
+          command:
+            - sh
+            - '-c'
+            - |
+              TIMEOUT_SECONDS=120
+              elapsed=0
+              echo "[wait-for-proxy] waiting for claw-proxy:8080 (timeout ${TIMEOUT_SECONDS}s)..."
+              while ! nc -z claw-proxy 8080 2>/dev/null; do
+                elapsed=$((elapsed + 1))
+                if [ "$elapsed" -ge "$TIMEOUT_SECONDS" ]; then
+                  echo "[wait-for-proxy] ERROR: claw-proxy:8080 not reachable after ${TIMEOUT_SECONDS}s"
+                  exit 1
+                fi
+                if [ $((elapsed % 15)) -eq 0 ]; then
+                  echo "[wait-for-proxy] still waiting... (${elapsed}s/${TIMEOUT_SECONDS}s)"
+                fi
+                sleep 1
+              done
+              echo "[wait-for-proxy] proxy is up (after ${elapsed}s)"
+          resources:
+            limits:
+              cpu: 50m
+              memory: 32Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+        - resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 50m
+              memory: 32Mi
+          terminationMessagePath: /dev/termination-log
+          name: init-kubectl
+          command:
+            - sh
+            - '-c'
+            - cp /usr/bin/oc /usr/bin/kubectl /tools/
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: kubectl-bin
+              mountPath: /tools
+          terminationMessagePolicy: File
+          image: 'quay.io/openshift/origin-cli:4.21'
+      serviceAccountName: default
+      schedulerName: default-scheduler
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - resources:
+            limits:
+              cpu: '2'
+              memory: 4Gi
+            requests:
+              cpu: 250m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 18789
+              scheme: HTTP
+            timeoutSeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          terminationMessagePath: /dev/termination-log
+          name: gateway
+          command:
+            - tini
+            - '-s'
+            - '--'
+            - node
+            - /app/dist/index.js
+            - gateway
+            - run
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 18789
+              scheme: HTTP
+            timeoutSeconds: 15
+            periodSeconds: 30
+            successThreshold: 1
+            failureThreshold: 5
+          env:
+            - name: HOME
+              value: /home/node
+            - name: OPENCLAW_HOME
+              value: /home/node
+            - name: OPENCLAW_STATE_DIR
+              value: /home/node/.openclaw
+            - name: OPENCLAW_CONFIG_PATH
+              value: /home/node/.openclaw/openclaw.json
+            - name: NODE_ENV
+              value: production
+            - name: OPENCLAW_PROXY_ACTIVE
+              value: '1'
+            - name: OPENCLAW_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: claw-gateway-token
+                  key: token
+            - name: HTTP_PROXY
+              value: 'http://claw-proxy:8080'
+            - name: HTTPS_PROXY
+              value: 'http://claw-proxy:8080'
+            - name: http_proxy
+              value: 'http://claw-proxy:8080'
+            - name: https_proxy
+              value: 'http://claw-proxy:8080'
+            - name: NO_PROXY
+              value: 'localhost,127.0.0.1,claw-proxy,kubernetes.default.svc'
+            - name: no_proxy
+              value: 'localhost,127.0.0.1,claw-proxy,kubernetes.default.svc'
+            - name: NODE_USE_ENV_PROXY
+              value: '1'
+            - name: NPM_CONFIG_CACHE
+              value: /home/node/.cache/npm
+            - name: CODEX_HOME
+              value: /home/node/.config/codex
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/proxy-ca/ca.crt
+            - name: SSL_CERT_FILE
+              value: /etc/proxy-ca/ca.crt
+            - name: REQUESTS_CA_BUNDLE
+              value: /etc/proxy-ca/ca.crt
+            - name: CURL_CA_BUNDLE
+              value: /etc/proxy-ca/ca.crt
+            - name: GIT_SSL_CAINFO
+              value: /etc/proxy-ca/ca.crt
+            - name: GIT_CONFIG_COUNT
+              value: '3'
+            - name: GIT_CONFIG_KEY_0
+              value: 'url.https://github.com/.insteadOf'
+            - name: GIT_CONFIG_VALUE_0
+              value: 'git+ssh://git@github.com/'
+            - name: GIT_CONFIG_KEY_1
+              value: 'url.https://github.com/.insteadOf'
+            - name: GIT_CONFIG_VALUE_1
+              value: 'ssh://git@github.com/'
+            - name: GIT_CONFIG_KEY_2
+              value: 'url.https://github.com/.insteadOf'
+            - name: GIT_CONFIG_VALUE_2
+              value: 'git@github.com:'
+            - name: KUBECONFIG
+              value: /etc/kube/config
+            - name: PATH
+              value: '/opt/kube-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            allowPrivilegeEscalation: false
+          ports:
+            - name: gateway
+              containerPort: 18789
+              protocol: TCP
+          imagePullPolicy: IfNotPresent
+          startupProbe:
+            tcpSocket:
+              port: 18789
+            timeoutSeconds: 1
+            periodSeconds: 5
+            successThreshold: 1
+            failureThreshold: 60
+          volumeMounts:
+            - name: claw-home
+              mountPath: /home/node/.openclaw
+              subPath: home
+            - name: claw-home
+              mountPath: /home/node/.local
+              subPath: home/.local
+            - name: claw-home
+              mountPath: /home/node/.cache
+              subPath: home/.cache
+            - name: claw-home
+              mountPath: /home/node/.config
+              subPath: home/.config
+            - name: tmp-volume
+              mountPath: /tmp
+            - name: proxy-ca
+              readOnly: true
+              mountPath: /etc/proxy-ca
+            - name: kube-config
+              readOnly: true
+              mountPath: /etc/kube
+            - name: kubectl-bin
+              readOnly: true
+              mountPath: /opt/kube-tools
+          terminationMessagePolicy: File
+          image: 'ghcr.io/openclaw/openclaw:2026.6.6'
+      automountServiceAccountToken: true
+      serviceAccount: default
+      volumes:
+        - name: claw-home
+          persistentVolumeClaim:
+            claimName: claw-home-pvc
+        - name: config
+          configMap:
+            name: claw-config
+            defaultMode: 420
+        - name: tmp-volume
+          emptyDir: {}
+        - name: proxy-ca
+          secret:
+            secretName: claw-proxy-ca
+            items:
+              - key: ca.crt
+                path: ca.crt
+            defaultMode: 420
+        - name: kube-config
+          configMap:
+            name: claw-kube-config
+            defaultMode: 420
+        - name: kubectl-bin
+          emptyDir: {}
+      dnsPolicy: ClusterFirst
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600

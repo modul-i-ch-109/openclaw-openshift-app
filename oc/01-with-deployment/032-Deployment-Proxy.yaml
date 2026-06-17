@@ -1,0 +1,118 @@
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: claw-proxy
+  labels:
+    app: claw
+    app.kubernetes.io/part-of: claw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: claw-proxy
+  template:
+    metadata:
+      labels:
+        app: claw-proxy
+    spec:
+      restartPolicy: Always
+      serviceAccountName: default
+      schedulerName: default-scheduler
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 3
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          terminationMessagePath: /dev/termination-log
+          name: proxy
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 5
+            timeoutSeconds: 1
+            periodSeconds: 15
+            successThreshold: 1
+            failureThreshold: 3
+          env:
+            - name: CRED_CUSTOM_LLM
+              valueFrom:
+                secretKeyRef:
+                  name: llm-key
+                  key: custom-api-key
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: proxy-config
+              readOnly: true
+              mountPath: /etc/proxy/proxy-config.json
+              subPath: proxy-config.json
+            - name: proxy-ca
+              readOnly: true
+              mountPath: /etc/proxy/ca
+            - name: cred-k8s-workspace
+              readOnly: true
+              mountPath: /etc/proxy/credentials/k8s-workspace
+          terminationMessagePolicy: File
+          image: 'quay.io/codeready-toolchain/claw-proxy:1ab038a'
+          args:
+            - '--config=/etc/proxy/proxy-config.json'
+            - '--ca-cert=/etc/proxy/ca/ca.crt'
+            - '--ca-key=/etc/proxy/ca/ca.key'
+            - '--listen=:8080'
+      automountServiceAccountToken: true
+      serviceAccount: default
+      volumes:
+        - name: proxy-config
+          configMap:
+            name: claw-proxy-config
+            defaultMode: 420
+        - name: proxy-ca
+          secret:
+            secretName: claw-proxy-ca
+            defaultMode: 420
+        - name: cred-k8s-workspace
+          secret:
+            secretName: workspace-kubeconfig
+            items:
+              - key: kubeconfig
+                path: kubeconfig
+            defaultMode: 420
+      dnsPolicy: ClusterFirst
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600

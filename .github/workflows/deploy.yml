@@ -1,0 +1,161 @@
+name: Deploy OpenClaw
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/openshift/origin-cli:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Connect to OpenShift
+        run: |
+          oc login \
+            --token=${{ secrets.OPENSHIFT_TOKEN }} \
+            --server=${{ secrets.OPENSHIFT_SERVER }} \
+            --insecure-skip-tls-verify
+          oc project ${{ secrets.OPENSHIFT_PROJECT }}
+
+      - name: Create workspace-kubeconfig secret
+        run: |
+          cat > /tmp/kubeconfig << EOF
+          apiVersion: v1
+          kind: Config
+          clusters:
+          - cluster:
+              server: ${{ secrets.OPENSHIFT_SERVER }}
+              insecure-skip-tls-verify: true
+            name: target
+          contexts:
+          - context:
+              cluster: target
+              namespace: ${{ secrets.OPENSHIFT_PROJECT }}
+              user: pipeline
+            name: default
+          current-context: default
+          users:
+          - name: pipeline
+            user:
+              token: ${{ secrets.OPENSHIFT_TOKEN }}
+          EOF
+          oc create secret generic workspace-kubeconfig \
+            --from-file=kubeconfig=/tmp/kubeconfig \
+            --dry-run=client -o yaml \
+            | oc apply -f - \
+            && oc label secret workspace-kubeconfig app=claw --overwrite
+          rm /tmp/kubeconfig
+
+      - name: Create claw-gateway-token secret
+        run: |
+          oc create secret generic claw-gateway-token \
+            --from-literal=token=${{ secrets.OPENCLAW_TOKEN }} \
+            --dry-run=client -o yaml \
+            | oc apply -f - \
+            && oc label secret claw-gateway-token app=claw --overwrite
+
+      - name: Create llm-key secret
+        run: |
+          oc create secret generic llm-key \
+            --from-literal=custom-api-key=${{ secrets.AZURE_API_KEY }} \
+            --dry-run=client -o yaml \
+            | oc apply -f - \
+            && oc label secret llm-key app=claw --overwrite
+
+      - name: Create claw-proxy-ca secret
+        run: |
+          echo "${{ secrets.OPENCLAW_PROXY_CA_CRT }}" > /tmp/ca.crt
+          echo "${{ secrets.OPENCLAW_PROXY_CA_KEY }}" > /tmp/ca.key
+          oc create secret generic claw-proxy-ca \
+            --from-file=ca.crt=/tmp/ca.crt \
+            --from-file=ca.key=/tmp/ca.key \
+            --dry-run=client -o yaml \
+            | oc apply -f - \
+            && oc label secret claw-proxy-ca \
+               app=claw \
+               app.kubernetes.io/part-of=claw \
+               --overwrite
+          rm /tmp/ca.crt /tmp/ca.key
+
+      - name: Substitute variables in ConfigMaps and workspace templates
+        run: |
+          OPENSHIFT_API_HOST=$(echo "${{ secrets.OPENSHIFT_SERVER }}" | sed 's|https://||')
+
+          sed -i \
+            -e "s|\${OPENSHIFT_SERVER}|${{ secrets.OPENSHIFT_SERVER }}|g" \
+            -e "s|\${OPENSHIFT_PROJECT}|${{ secrets.OPENSHIFT_PROJECT }}|g" \
+            -e "s|\${OPENSHIFT_API_HOST}|${OPENSHIFT_API_HOST}|g" \
+            oc/01-with-deployment/072-Config-Map-Claw-KubeConfig.yaml \
+            oc/01-with-deployment/071-Config-Map-Claw-Config.yaml \
+            oc/01-with-deployment/073-Config-Map-Claw-ProxyConfig.yaml
+
+          for f in openclaw/workspace-templates/*.md; do
+            sed -i \
+              -e "s|\${OPENSHIFT_PROJECT}|${{ secrets.OPENSHIFT_PROJECT }}|g" \
+              -e "s|\${AGENT_NAME}|${{ secrets.AGENT_NAME }}|g" \
+              -e "s|\${ORGANISATION_NAME}|${{ secrets.ORGANISATION_NAME }}|g" \
+              -e "s|\${OPERATOR_NAME}|${{ secrets.OPERATOR_NAME }}|g" \
+              -e "s|\${AZURE_OPENAI_DEPLOYMENT}|${{ secrets.AZURE_OPENAI_DEPLOYMENT }}|g" \
+              -e "s|\${AZURE_OPENAI_ENDPOINT}|${{ secrets.AZURE_OPENAI_ENDPOINT }}|g" \
+              "$f"
+          done
+
+      - name: Resolve allowed origin
+        run: |
+          ROUTE_HOST=$(oc get route claw \
+            -n ${{ secrets.OPENSHIFT_PROJECT }} \
+            -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
+          if [ -z "$ROUTE_HOST" ]; then
+            echo "ALLOWED_ORIGIN=ALLOWED_ORIGIN_PLACEHOLDER" >> $GITHUB_ENV
+          else
+            echo "ALLOWED_ORIGIN=https://$ROUTE_HOST" >> $GITHUB_ENV
+          fi
+
+      - name: Patch ConfigMap with resolved origin
+        run: |
+          sed -i "s|ALLOWED_ORIGIN_PLACEHOLDER|${{ env.ALLOWED_ORIGIN }}|g" \
+            oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+
+      - name: Inject workspace templates into ConfigMap
+        run: |
+          for f in openclaw/workspace-templates/*.md; do
+            filename=$(basename "$f")
+            echo "  _ws_${filename}: |" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+            sed 's/^/    /' "$f" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+          done
+
+          for f in sre/runbooks/*.md; do
+            [ -f "$f" ] || continue
+            filename=$(basename "$f")
+            echo "  _ws_runbooks--${filename}: |" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+            sed 's/^/    /' "$f" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+          done
+
+      - name: Apply all resources
+        run: oc apply -f oc/01-with-deployment/
+
+      - name: Resolve origin after apply (first deploy)
+        run: |
+          if [ "${{ env.ALLOWED_ORIGIN }}" = "ALLOWED_ORIGIN_PLACEHOLDER" ]; then
+            sleep 5
+            ROUTE_HOST=$(oc get route claw \
+              -n ${{ secrets.OPENSHIFT_PROJECT }} \
+              -o jsonpath='{.spec.host}')
+            ALLOWED_ORIGIN="https://$ROUTE_HOST"
+            sed -i "s|ALLOWED_ORIGIN_PLACEHOLDER|$ALLOWED_ORIGIN|g" \
+              oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+            oc apply -f oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+          fi
+
+      - name: Restart deployment
+        run: oc rollout restart deployment/claw
+
+      - name: Wait for rollout
+        run: oc rollout status deployment/claw --timeout=3m

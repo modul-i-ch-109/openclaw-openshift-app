@@ -1,0 +1,9 @@
+# --- Sensitive Data & Credentials ---
+# Ensure credentials and private keys are never committed to the repository
+*.tfvars
+*.pem
+*.pub
+
+# --- OS-Specific System Files ---
+.DS_Store
+Thumbs.db

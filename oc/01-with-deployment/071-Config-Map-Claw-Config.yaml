@@ -1,0 +1,344 @@
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: claw-config
+  labels:
+    app: claw
+    app.kubernetes.io/part-of: claw
+data:
+  openclaw.json: |
+    {
+      "agents": {
+        "defaults": {
+          "workspace": "~/.openclaw/workspace"
+        },
+        "list": [
+          {
+            "id": "default",
+            "name": "OpenClaw Assistant",
+            "workspace": "~/.openclaw/workspace"
+          }
+        ]
+      }
+    }
+
+  operator.json: |-
+    {
+      "agents": {
+        "defaults": {
+          "memorySearch": {
+            "enabled": false
+          },
+          "model": {
+            "primary": "custom-llm/gpt-4o-mini"
+          },
+          "models": {
+            "custom-llm/gpt-4o-mini": {
+              "alias": "GPT-4o Mini (Azure Foundry)"
+            }
+          },
+          "skipBootstrap": false,
+          "skipOptionalBootstrapFiles": [
+            "SOUL.md",
+            "IDENTITY.md"
+          ]
+        }
+      },
+      "gateway": {
+        "auth": {
+          "mode": "token"
+        },
+        "bind": "lan",
+        "controlUi": {
+          "allowedOrigins": [
+            "ALLOWED_ORIGIN_PLACEHOLDER"
+          ],
+          "dangerouslyDisableDeviceAuth": true,
+          "enabled": true
+        },
+        "mode": "local",
+        "port": 18789,
+        "trustedProxies": [
+          "10.0.0.0/8",
+          "172.16.0.0/12"
+        ]
+      },
+      "hooks": {
+        "internal": {
+          "enabled": true,
+          "entries": {
+            "bootstrap-extra-files": {
+              "enabled": true,
+              "paths": [
+                ".operator/BOOTSTRAP.md"
+              ]
+            }
+          }
+        }
+      },
+      "models": {
+        "providers": {
+          "custom-llm": {
+            "apiKey": "ah-ah-ah-you-didnt-say-the-magic-word",
+            "baseUrl": "https://hub-ai-foundry-central.cognitiveservices.azure.com/openai/deployments/gpt-4o-mini?api-version=2025-01-01-preview",
+            "models": [
+              {
+                "id": "gpt-4o-mini",
+                "name": "gpt-4o-mini"
+              }
+            ]
+          }
+        }
+      },
+      "update": {
+        "checkOnStart": false
+      }
+    }
+
+  merge.js: |
+    const fs = require("fs");
+    const path = require("path");
+    const mode = process.env.CLAW_CONFIG_MODE || "merge";
+    const configDir = "/config";
+    const pvcDir = "/home/node/.openclaw";
+    const workspaceDir = path.join(pvcDir, "workspace");
+
+    function deepMerge(target, source) {
+      const result = { ...target };
+      for (const key of Object.keys(source)) {
+        if (
+          source[key] &&
+          typeof source[key] === "object" &&
+          !Array.isArray(source[key]) &&
+          result[key] &&
+          typeof result[key] === "object" &&
+          !Array.isArray(result[key])
+        ) {
+          result[key] = deepMerge(result[key], source[key]);
+        } else {
+          result[key] = source[key];
+        }
+      }
+      return result;
+    }
+
+    function copyAlways(src, dest) {
+      const dir = path.dirname(dest);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.copyFileSync(src, dest);
+      console.log(`[init-config] copied ${dest}`);
+    }
+
+    function seedIfMissing(src, dest) {
+      if (!fs.existsSync(dest)) {
+        const dir = path.dirname(dest);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.copyFileSync(src, dest);
+        console.log(`[init-config] seeded ${dest}`);
+      }
+    }
+
+    // Verzeichnisse sicherstellen
+    for (const sub of ["workspace", ".local", ".cache", ".config/codex"]) {
+      fs.mkdirSync(path.join(pvcDir, sub), { recursive: true });
+    }
+
+    // operator.json einlesen
+    const ops = JSON.parse(fs.readFileSync(path.join(configDir, "operator.json"), "utf8"));
+    const seed = JSON.parse(fs.readFileSync(path.join(configDir, "openclaw.json"), "utf8"));
+    const pvcPath = path.join(pvcDir, "openclaw.json");
+
+    if (mode === "merge" && fs.existsSync(pvcPath)) {
+      let base = seed;
+      try {
+        base = JSON.parse(fs.readFileSync(pvcPath, "utf8"));
+      } catch (err) {
+        console.warn("[init-config] existing openclaw.json is invalid JSON; falling back to seed");
+      }
+      const savedPrimary = base?.agents?.defaults?.model?.primary;
+      const savedFallbacks = base?.agents?.defaults?.model?.fallbacks;
+      const merged = deepMerge(base, ops);
+      if (savedPrimary || savedFallbacks) {
+        merged.agents = merged.agents || {};
+        merged.agents.defaults = merged.agents.defaults || {};
+        merged.agents.defaults.model = merged.agents.defaults.model || {};
+        if (savedPrimary) merged.agents.defaults.model.primary = savedPrimary;
+        if (savedFallbacks) merged.agents.defaults.model.fallbacks = savedFallbacks;
+      }
+      fs.writeFileSync(pvcPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
+      console.log("[init-config] merged operator.json into existing openclaw.json");
+    } else {
+      fs.writeFileSync(pvcPath, JSON.stringify(deepMerge(seed, ops), null, 2), { mode: 0o600 });
+      console.log(`[init-config] wrote openclaw.json (mode=${mode})`);
+    }
+
+    // _ws_* Keys: Git ist Source of Truth → copyAlways
+    for (const f of fs.readdirSync(configDir)) {
+      if (!f.startsWith("_ws_")) continue;
+      const relPath = f.slice(4).replace(/--/g, "/");
+      copyAlways(path.join(configDir, f), path.join(workspaceDir, relPath));
+    }
+
+    // BOOTSTRAP.md nur seeden wenn nicht vorhanden
+    // (Agent löscht ihn nach Bootstrap → nicht überschreiben)
+    seedIfMissing(
+      path.join(configDir, "BOOTSTRAP.md"),
+      path.join(workspaceDir, ".operator", "BOOTSTRAP.md")
+    );
+
+    // Operator-Skills immer kopieren
+    copyAlways(
+      path.join(configDir, "PLATFORM.md"),
+      path.join(workspaceDir, "skills", "platform", "SKILL.md")
+    );
+    const k8sSkill = path.join(configDir, "KUBERNETES.md");
+    if (fs.existsSync(k8sSkill)) {
+      copyAlways(k8sSkill, path.join(workspaceDir, "skills", "kubernetes", "SKILL.md"));
+    }
+    for (const f of fs.readdirSync(configDir)) {
+      if (!f.startsWith("_skill_")) continue;
+      const skillName = f.slice(7);
+      copyAlways(
+        path.join(configDir, f),
+        path.join(workspaceDir, "skills", skillName, "SKILL.md")
+      );
+    }
+
+  BOOTSTRAP.md: |
+    # Hello, World
+
+    You just came online in a fresh workspace. There's no memory yet — that's
+    normal.
+
+    ## Get to know your human
+
+    Start a conversation. Don't interrogate — just talk:
+
+    > "Hey, I just came online. Before we dive in — what should I call you?
+    > And do you want me to have a name, or should I just be 'the assistant'?"
+
+    Figure out together:
+
+    1. **Names** — yours and theirs
+    2. **Style** — formal? casual? concise? detailed?
+    3. **Anything else** — timezone, preferences, how they work
+
+    ## Write it down
+
+    Create or update these files with what you learn:
+
+    - `SOUL.md` — your personality, style, principles
+    - `IDENTITY.md` — your name, vibe, emoji (if any). This file may not exist yet — create it.
+    - `USER.md` — their name, preferences, timezone. This file may not exist yet — create it.
+
+    ## When you're done
+
+    Delete this file (`.operator/BOOTSTRAP.md`). You won't need it again —
+    you're you now.
+
+  PLATFORM.md: |
+    ---
+    name: platform
+    description: "Platform overview, proxy architecture, LLM provider and custom provider model management, messaging channel integration, MCP server configuration, and web search/fetch."
+    ---
+
+    # Platform Overview
+
+    You are running on an OpenShift cluster managed by the Claw operator. Key constraints:
+
+    - **Non-root execution:** All containers run as a random non-root UID assigned by
+      OpenShift's Security Context Constraints (restricted seccomp, all capabilities
+      dropped). You cannot bind privileged ports or write outside designated paths.
+    - **Claw CR manages infrastructure:** LLM provider credentials, messaging
+      channels, proxy domain allowlisting, and Kubernetes API access. The operator
+      reconciles the CR into Deployments, ConfigMaps, Secrets, NetworkPolicies, and
+      Routes. Application settings (diagnostics, CORS origins, model preferences,
+      agent defaults) can be set declaratively via `spec.config.raw` in the CR.
+      Non-operator-managed config can also be managed via `openclaw config patch`.
+    - **You cannot read or modify the Claw CR.** Even if a `type: kubernetes`
+      credential is configured, it is not meant for managing this OpenClaw instance.
+      Always guide the user on what CR changes to make — provide the correct YAML
+      snippets and `oc`/`kubectl` commands for them to run.
+    - **Do NOT invent Claw CR fields.** Only reference `spec.*` fields that are
+      explicitly documented in this skill. If a setting is not mentioned here, it is
+      not a CR field — do not suggest CR changes for it. When unsure, say you don't
+      know rather than guessing.
+
+    # Proxy Architecture
+
+    All outbound traffic from this pod goes through a credential-injecting MITM proxy
+    via `HTTP_PROXY`/`HTTPS_PROXY` environment variables. The proxy blocks any domain
+    that is not explicitly configured.
+
+    LLM provider credentials (API keys, OAuth tokens, GCP service account tokens) are
+    injected by the proxy — you never see real secrets. For non-LLM services that need
+    network access without credential injection, the proxy can allowlist domains using
+    `type: none` credential entries.
+
+    ## Pre-allowed domains
+
+    The following domains are always allowed without any user configuration:
+    - `clawhub.ai` — ClawHub plugin registry
+    - `openrouter.ai` — model pricing API
+    - `github.com` — git HTTPS clones
+    - `codeload.github.com` — tarball fetches
+    - `raw.githubusercontent.com` — LiteLLM pricing data (path-restricted)
+    - `registry.npmjs.org` — npm package downloads
+
+    ## Proxy behavior notes
+
+    - **Error signature:** "ECONNREFUSED", "ETIMEDOUT", or "socket hang up" on outbound
+      requests usually indicates the proxy is blocking that domain.
+    - **Secret rotation:** Updating a referenced Secret triggers automatic proxy pod
+      rollout. No CR change needed.
+    - **Container names:** proxy container is `proxy`, app is `gateway`.
+
+    # Application Configuration
+
+    The following keys in `openclaw.json` are operator-managed and must not be
+    changed via config patches:
+    - `gateway.mode`, `gateway.bind`, `gateway.port`, `gateway.controlUi.enabled`
+    - `gateway.auth.*`, `gateway.controlUi.dangerouslyDisableDeviceAuth`
+    - `models.providers`
+
+    User-managed settings (safe to patch):
+    - `diagnostics.*`, `session.*`, `logging.*`, `plugins.*`, `skills.*`,
+      `ui.*`, `cron.*`, `hooks.*`
+
+  KUBERNETES.md: |
+    ---
+    name: kubernetes
+    description: "Kubernetes/OpenShift cluster access. Use when the user asks about deployments, pods, services, builds, routes, or any cluster resource."
+    ---
+
+    # Kubernetes Access
+
+    You have access to Kubernetes/OpenShift clusters. Both `kubectl` and `oc` are
+    available and your KUBECONFIG is pre-configured — authentication is handled
+    transparently by the proxy.
+
+    ## Available contexts
+
+    - `workspace` (cluster: target, namespace: ${OPENSHIFT_PROJECT}) [current]
+
+    ## How to use
+
+    Use kubectl/oc directly to help the user with deployments, pods, services,
+    routes, builds, logs, or any cluster resource. Inspection commands (get,
+    describe, logs, events) are always safe to run proactively.
+
+    ## Access scope
+
+    Your access is governed by RBAC. The configured namespace(s) above are your
+    primary workspace. Some cluster-scoped resources (e.g., StorageClasses, CRDs,
+    ClusterRoles) may be readable. Other namespaces are not accessible.
+
+    If a command fails with Forbidden, explain the limitation clearly and suggest
+    alternatives within scope.
+
+    ## Rules
+
+    - Confirm before destructive operations (delete, scale to zero, rollback).
+    - Do not attempt to manage tokens, certificates, or kubeconfig yourself.
+    - Do not try to escalate privileges or create ClusterRoleBindings.

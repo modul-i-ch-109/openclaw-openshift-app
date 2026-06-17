@@ -1,0 +1,58 @@
+---
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: claw-egress
+  labels:
+    app: claw
+    app.kubernetes.io/part-of: claw
+spec:
+  podSelector:
+    matchLabels:
+      app: claw
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 8080
+      to:
+        - podSelector:
+            matchLabels:
+              app: claw-proxy
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
+      to:
+        - namespaceSelector: {}
+  policyTypes:
+    - Egress
+---
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: claw-ingress
+  labels:
+    app: claw
+    app.kubernetes.io/part-of: claw
+spec:
+  podSelector:
+    matchLabels:
+      app: claw
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 18789
+      from:
+        - namespaceSelector:
+            matchLabels:
+              policy-group.network.openshift.io/ingress: ''
+        - namespaceSelector:
+            matchLabels:
+              policy-group.network.openshift.io/host-network: ''
+  policyTypes:
+    - Ingress
