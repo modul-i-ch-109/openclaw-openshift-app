@@ -35,9 +35,8 @@ data:
           "injector": "none"
         },
         {
-          "domain": "hub-ai-foundry-central.cognitiveservices.azure.com",
-          "injector": "bearer",
-          "envVar": "CRED_CUSTOM_LLM"
+          "domain": "api.anthropic.com",
+          "injector": "none"
         },
         {
           "domain": "openrouter.ai",

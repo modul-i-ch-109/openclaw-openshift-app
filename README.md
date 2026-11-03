@@ -45,20 +45,19 @@ variables.
 │       └── destroy.yml
 ├── .gitlab-ci.yml
 ├── README.md
-├── oc/
-│   └── 01-with-deployment/
-│       ├── 010-PVC.yaml
-│       ├── 021-NetworkPolicy-Clawy.yaml
-│       ├── 022-NetworkPolicy-ClawProxy.yaml
-│       ├── 031-Deployment-Claw.yaml
-│       ├── 032-Deployment-Proxy.yaml
-│       ├── 041-Service-Claw.yaml
-│       ├── 042-Service-Proxy.yaml
-│       ├── 050-Route.yaml
-│       ├── 060-HPA.yaml
-│       ├── 071-Config-Map-Claw-Config.yaml     ← ws templates injected here by pipeline
-│       ├── 072-Config-Map-Claw-KubeConfig.yaml
-│       └── 073-Config-Map-Claw-ProxyConfig.yaml
+├── openshift/
+│   ├── 010-PVC.yml
+│   ├── 021-NetworkPolicy-Claw.yml
+│   ├── 022-NetworkPolicy-ClawProxy.yml
+│   ├── 031-Deployment-Claw.yml
+│   ├── 032-Deployment-Proxy.yml
+│   ├── 041-Service-Claw.yml
+│   ├── 042-Service-Proxy.yml
+│   ├── 050-Route.yml
+│   ├── 060-HPA.yml
+│   ├── 071-Config-Map-Claw-Config.yml     ← ws templates + runbooks injected here by pipeline
+│   ├── 072-Config-Map-Claw-KubeConfig.yml
+│   └── 073-Config-Map-Claw-ProxyConfig.yml
 ├── openclaw/
 │   └── workspace-templates/
 │       ├── AGENTS.md
@@ -68,7 +67,9 @@ variables.
 │       └── USER.md
 └── sre/
     └── runbooks/
-        └── Deploy.md
+        ├── HPAInvalidScaleTarget.md
+        ├── PodCrashLoopBackOff.md
+        └── PostgresHAClusterDegraded.md
 ```
 
 > **Note:** No secrets are stored in the repository. All secrets (`claw-gateway-token`,
@@ -78,6 +79,47 @@ variables.
 ---
 
 ## Prerequisites
+
+### Model Provider Setup (one-time per credential)
+
+OpenClaw is configured to use **Claude, authenticated against your
+existing claude.ai Pro/Max subscription** rather than a pay-per-token
+API key, via OpenClaw's own built-in `anthropic` provider directly (no
+custom `models.providers` config, no proxy credential injection
+needed).
+
+> Earlier versions of this repo used a single hardcoded Azure OpenAI
+> deployment behind a custom MITM-proxy-injected credential. That's gone
+> - found live, this subscription's Azure tenant enforces a hard,
+> account-wide ~50K-tokens/minute rate limit that made Azure OpenAI
+> unusable here regardless of model/deployment/SKU. A plain OpenAI API
+> key was tried next, but that's usage-billed per token - found live,
+> that silently burns through account credits and then hard-fails with
+> "no credits remaining" once they're gone. Anthropic's subscription
+> setup-token avoids that: usage comes out of the existing Claude
+> Pro/Max allowance, not separate API billing.
+
+#### Claude (your claude.ai Pro/Max subscription, no separate API key)
+
+OpenClaw supports authenticating Anthropic's `anthropic` provider with a
+**subscription setup-token** instead of a pay-per-token API key - this
+uses your existing Claude Pro/Max subscription's usage allowance, not
+separate API billing. Generate it **on your own machine** (the Claude
+Code CLI needs to be installed there and logged into your subscription,
+NOT inside the cluster):
+
+```bash
+npm install -g @anthropic-ai/claude-code   # if not already installed
+claude login                                # log into your claude.ai subscription, if not already
+claude setup-token                          # prints a token to stdout
+```
+
+Set the printed token as the `ANTHROPIC_SETUP_TOKEN` CI/CD variable. It
+gets registered into OpenClaw's own `auth-profiles.json` by an init
+container (`init-model-auth` in `031-Deployment-Claw.yml`) on every pod
+start - re-run `claude setup-token` and update the variable if it ever
+expires (`openclaw models status --check` from inside the pod reports
+expiry).
 
 ### Required OpenShift Setup (one-time, per namespace)
 
@@ -144,9 +186,7 @@ The following variables are required for both GitLab CI and GitHub Actions:
 | `OPENCLAW_TOKEN` | Gateway authentication token (`openssl rand -hex 32`) | ✅ |
 | `OPENCLAW_PROXY_CA_CRT` | PEM content of proxy CA certificate | ❌ |
 | `OPENCLAW_PROXY_CA_KEY` | PEM content of proxy CA private key | ❌ |
-| `AZURE_API_KEY` | Azure OpenAI API key | ✅ |
-| `AZURE_OPENAI_DEPLOYMENT` | Azure OpenAI deployment name (e.g. `gpt-4o-mini`) | ✅ |
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint hostname | ✅ |
+| `ANTHROPIC_SETUP_TOKEN` | Claude subscription setup-token (`claude setup-token`) | ✅ |
 | `AGENT_NAME` | Display name of the AI agent (e.g. `Claw`) | ❌ |
 | `ORGANISATION_NAME` | Organisation name injected into agent templates | ❌ |
 | `OPERATOR_NAME` | Primary operator name injected into agent templates | ❌ |
@@ -169,9 +209,7 @@ export OPENSHIFT_PROJECT=$(oc project -q)
 export OPENCLAW_TOKEN="$(openssl rand -hex 32)"
 export OPENCLAW_PROXY_CA_CRT="$(cat ca.crt)"
 export OPENCLAW_PROXY_CA_KEY="$(cat ca.key)"
-export AZURE_API_KEY="..."
-export AZURE_OPENAI_DEPLOYMENT="gpt-4o-mini"
-export AZURE_OPENAI_ENDPOINT="hub-ai-foundry-central.cognitiveservices.azure.com"
+export ANTHROPIC_SETUP_TOKEN="..."          # from `claude setup-token`, see "Model Provider Setup" above
 export AGENT_NAME="Claw"
 export ORGANISATION_NAME="ZLI AIOps Demo"
 export OPERATOR_NAME="Ben Schwarz"
@@ -244,9 +282,9 @@ oc create secret generic claw-proxy-ca \
 oc label secret claw-proxy-ca app=claw app.kubernetes.io/part-of=claw --overwrite
 rm /tmp/ca.crt /tmp/ca.key
 
-# LLM API key
+# LLM credential
 oc create secret generic llm-key \
-  --from-literal=custom-api-key=$AZURE_API_KEY \
+  --from-literal=anthropic-setup-token=$ANTHROPIC_SETUP_TOKEN \
   --dry-run=client -o yaml | oc apply -f -
 oc label secret llm-key app=claw app.kubernetes.io/part-of=claw --overwrite
 
@@ -288,9 +326,9 @@ sed -i \
   -e "s|\${OPENSHIFT_SERVER}|$OPENSHIFT_SERVER|g" \
   -e "s|\${OPENSHIFT_PROJECT}|$OPENSHIFT_PROJECT|g" \
   -e "s|\${OPENSHIFT_API_HOST}|$OPENSHIFT_API_HOST|g" \
-  oc/01-with-deployment/072-Config-Map-Claw-KubeConfig.yaml \
-  oc/01-with-deployment/071-Config-Map-Claw-Config.yaml \
-  oc/01-with-deployment/073-Config-Map-Claw-ProxyConfig.yaml
+  openshift/072-Config-Map-Claw-KubeConfig.yml \
+  openshift/071-Config-Map-Claw-Config.yml \
+  openshift/073-Config-Map-Claw-ProxyConfig.yml
 
 for f in openclaw/workspace-templates/*.md; do
   sed -i \
@@ -298,8 +336,6 @@ for f in openclaw/workspace-templates/*.md; do
     -e "s|\${AGENT_NAME}|$AGENT_NAME|g" \
     -e "s|\${ORGANISATION_NAME}|$ORGANISATION_NAME|g" \
     -e "s|\${OPERATOR_NAME}|$OPERATOR_NAME|g" \
-    -e "s|\${AZURE_OPENAI_DEPLOYMENT}|$AZURE_OPENAI_DEPLOYMENT|g" \
-    -e "s|\${AZURE_OPENAI_ENDPOINT}|$AZURE_OPENAI_ENDPOINT|g" \
     "$f"
 done
 ```
@@ -317,7 +353,7 @@ else
 fi
 
 sed -i "s|ALLOWED_ORIGIN_PLACEHOLDER|$ALLOWED_ORIGIN|g" \
-  oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+  openshift/071-Config-Map-Claw-Config.yml
 ```
 
 #### 5. Inject workspace templates into ConfigMap
@@ -325,22 +361,22 @@ sed -i "s|ALLOWED_ORIGIN_PLACEHOLDER|$ALLOWED_ORIGIN|g" \
 ```bash
 for f in openclaw/workspace-templates/*.md; do
   filename=$(basename "$f")
-  echo "  _ws_${filename}: |" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
-  sed 's/^/    /' "$f" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+  echo "  _ws_${filename}: |" >> openshift/071-Config-Map-Claw-Config.yml
+  sed 's/^/    /' "$f" >> openshift/071-Config-Map-Claw-Config.yml
 done
 
 for f in sre/runbooks/*.md; do
   [ -f "$f" ] || continue
   filename=$(basename "$f")
-  echo "  _ws_runbooks--${filename}: |" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
-  sed 's/^/    /' "$f" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+  echo "  _ws_runbooks--${filename}: |" >> openshift/071-Config-Map-Claw-Config.yml
+  sed 's/^/    /' "$f" >> openshift/071-Config-Map-Claw-Config.yml
 done
 ```
 
 #### 6. Apply all resources
 
 ```bash
-oc apply -f oc/01-with-deployment/
+oc apply -f openshift/
 ```
 
 If this is a first-time deploy (Route did not exist yet), resolve the origin after
@@ -349,8 +385,8 @@ the Route has been created and re-apply the ConfigMap:
 ```bash
 ROUTE_HOST=$(oc get route claw -n $OPENSHIFT_PROJECT -o jsonpath='{.spec.host}')
 sed -i "s|ALLOWED_ORIGIN_PLACEHOLDER|https://$ROUTE_HOST|g" \
-  oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
-oc apply -f oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+  openshift/071-Config-Map-Claw-Config.yml
+oc apply -f openshift/071-Config-Map-Claw-Config.yml
 oc rollout restart deployment/claw
 ```
 
@@ -361,6 +397,44 @@ oc get secret claw-gateway-token -o jsonpath='{.data.token}' | base64 --decode
 ```
 
 Open the Route URL in your browser and enter the token when prompted.
+
+#### 8. Approve your browser (one-time per fresh state)
+
+Even with a valid token, OpenClaw requires a one-time **device pairing**
+approval for every browser the Gateway hasn't seen before — this is a
+deliberate security boundary (`gateway.auth.mode: token` does not support
+auto-approving browser/Control UI pairing; only a trusted
+identity-aware reverse proxy setup can, which this deployment does not
+use). You'll see a "Diesen Browser genehmigen" / "Approve this browser"
+screen after entering the token. It happens:
+
+- the first time you ever open the Control UI, and
+- again after any teardown that deletes the `claw-home-pvc` (device
+  pairings are stored there, so a fresh PVC means a fresh, empty device
+  table).
+
+Approve it from your own terminal (no need to ask anyone else — if you
+have `oc exec` access to the namespace, you already have full admin
+over the Gateway). Make sure the pod is `1/1 Running` first
+(`oc get pods -l app=claw`) — right after a deploy/rollout it can still
+be starting up, and `oc exec` fails with "container not found" until
+the gateway container is actually up:
+
+```bash
+oc exec deployment/claw -c gateway -- node /app/dist/index.js devices approve --latest
+```
+
+Or list pending requests first if you want to confirm the remote IP
+before approving a specific one (run these one at a time, not pasted
+together — the second line needs the first one's output):
+
+```bash
+oc exec deployment/claw -c gateway -- node /app/dist/index.js devices list --json
+```
+
+```bash
+oc exec deployment/claw -c gateway -- node /app/dist/index.js devices approve <requestId>
+```
 
 ---
 

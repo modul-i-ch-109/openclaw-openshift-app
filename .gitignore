@@ -1,8 +1,22 @@
+# --- Terraform Temporary Files & State ---
+.terraform/
+*.tfstate
+*.tfstate.backup
+tfplan
+
 # --- Sensitive Data & Credentials ---
 # Ensure credentials and private keys are never committed to the repository
 *.tfvars
 *.pem
-*.pub
+iac
+iac.pub
+ansible_id_ed25519
+ansible_id_ed25519.pub
+influx_token.txt
+
+# --- Pipeline & Dynamic Artifacts ---
+# These files are generated dynamically during the CI/CD pipeline execution
+ansible/inventory/hosts.ini
 
 # --- OS-Specific System Files ---
 .DS_Store

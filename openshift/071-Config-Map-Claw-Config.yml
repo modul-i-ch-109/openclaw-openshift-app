@@ -13,13 +13,12 @@ data:
         "defaults": {
           "workspace": "~/.openclaw/workspace"
         },
-        "list": [
-          {
-            "id": "default",
+        "entries": {
+          "default": {
             "name": "OpenClaw Assistant",
             "workspace": "~/.openclaw/workspace"
           }
-        ]
+        }
       }
     }
 
@@ -27,22 +26,19 @@ data:
     {
       "agents": {
         "defaults": {
-          "memorySearch": {
-            "enabled": false
-          },
           "model": {
-            "primary": "custom-llm/gpt-4o-mini"
-          },
-          "models": {
-            "custom-llm/gpt-4o-mini": {
-              "alias": "GPT-4o Mini (Azure Foundry)"
-            }
+            "primary": "anthropic/claude-sonnet-4-6"
           },
           "skipBootstrap": false,
           "skipOptionalBootstrapFiles": [
             "SOUL.md",
             "IDENTITY.md"
           ]
+        }
+      },
+      "memory": {
+        "search": {
+          "enabled": false
         }
       },
       "gateway": {
@@ -54,7 +50,6 @@ data:
           "allowedOrigins": [
             "ALLOWED_ORIGIN_PLACEHOLDER"
           ],
-          "dangerouslyDisableDeviceAuth": true,
           "enabled": true
         },
         "mode": "local",
@@ -74,20 +69,6 @@ data:
                 ".operator/BOOTSTRAP.md"
               ]
             }
-          }
-        }
-      },
-      "models": {
-        "providers": {
-          "custom-llm": {
-            "apiKey": "ah-ah-ah-you-didnt-say-the-magic-word",
-            "baseUrl": "https://hub-ai-foundry-central.cognitiveservices.azure.com/openai/deployments/gpt-4o-mini?api-version=2025-01-01-preview",
-            "models": [
-              {
-                "id": "gpt-4o-mini",
-                "name": "gpt-4o-mini"
-              }
-            ]
           }
         }
       },
@@ -299,7 +280,7 @@ data:
     The following keys in `openclaw.json` are operator-managed and must not be
     changed via config patches:
     - `gateway.mode`, `gateway.bind`, `gateway.port`, `gateway.controlUi.enabled`
-    - `gateway.auth.*`, `gateway.controlUi.dangerouslyDisableDeviceAuth`
+    - `gateway.auth.*`
     - `models.providers`
 
     User-managed settings (safe to patch):
