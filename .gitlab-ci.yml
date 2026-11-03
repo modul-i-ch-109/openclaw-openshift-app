@@ -55,7 +55,7 @@ deploy:openshift:
     - echo "Creating llm-key secret..."
     - |
       oc create secret generic llm-key \
-        --from-literal=custom-api-key=$AZURE_API_KEY \
+        --from-literal=anthropic-setup-token=$ANTHROPIC_SETUP_TOKEN \
         --dry-run=client -o yaml \
         | oc apply -f - \
         && oc label secret llm-key app=claw --overwrite
@@ -83,9 +83,9 @@ deploy:openshift:
         -e "s|\${OPENSHIFT_SERVER}|$OPENSHIFT_SERVER|g" \
         -e "s|\${OPENSHIFT_PROJECT}|$OPENSHIFT_PROJECT|g" \
         -e "s|\${OPENSHIFT_API_HOST}|$OPENSHIFT_API_HOST|g" \
-        oc/01-with-deployment/072-Config-Map-Claw-KubeConfig.yaml \
-        oc/01-with-deployment/071-Config-Map-Claw-Config.yaml \
-        oc/01-with-deployment/073-Config-Map-Claw-ProxyConfig.yaml
+        openshift/072-Config-Map-Claw-KubeConfig.yml \
+        openshift/071-Config-Map-Claw-Config.yml \
+        openshift/073-Config-Map-Claw-ProxyConfig.yml
 
       for f in openclaw/workspace-templates/*.md; do
         sed -i \
@@ -93,8 +93,6 @@ deploy:openshift:
           -e "s|\${AGENT_NAME}|$AGENT_NAME|g" \
           -e "s|\${ORGANISATION_NAME}|$ORGANISATION_NAME|g" \
           -e "s|\${OPERATOR_NAME}|$OPERATOR_NAME|g" \
-          -e "s|\${AZURE_OPENAI_DEPLOYMENT}|$AZURE_OPENAI_DEPLOYMENT|g" \
-          -e "s|\${AZURE_OPENAI_ENDPOINT}|$AZURE_OPENAI_ENDPOINT|g" \
           "$f"
       done
 
@@ -114,25 +112,25 @@ deploy:openshift:
     - echo "Patching ConfigMap with resolved origin..."
     - |
       sed -i "s|ALLOWED_ORIGIN_PLACEHOLDER|$ALLOWED_ORIGIN|g" \
-        oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+        openshift/071-Config-Map-Claw-Config.yml
 
     - echo "Injecting workspace templates into ConfigMap..."
     - |
       for f in openclaw/workspace-templates/*.md; do
         filename=$(basename "$f")
-        echo "  _ws_${filename}: |" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
-        sed 's/^/    /' "$f" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+        echo "  _ws_${filename}: |" >> openshift/071-Config-Map-Claw-Config.yml
+        sed 's/^/    /' "$f" >> openshift/071-Config-Map-Claw-Config.yml
       done
 
       for f in sre/runbooks/*.md; do
         [ -f "$f" ] || continue
         filename=$(basename "$f")
-        echo "  _ws_runbooks--${filename}: |" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
-        sed 's/^/    /' "$f" >> oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+        echo "  _ws_runbooks--${filename}: |" >> openshift/071-Config-Map-Claw-Config.yml
+        sed 's/^/    /' "$f" >> openshift/071-Config-Map-Claw-Config.yml
       done
 
     - echo "Applying all resources..."
-    - oc apply -f oc/01-with-deployment/
+    - oc apply -f openshift/
 
     - echo "Resolving origin after apply (Route wird jetzt erstellt falls neu)..."
     - |
@@ -143,8 +141,8 @@ deploy:openshift:
         ALLOWED_ORIGIN="https://$ROUTE_HOST"
         echo "Origin nach Apply: $ALLOWED_ORIGIN"
         sed -i "s|ALLOWED_ORIGIN_PLACEHOLDER|$ALLOWED_ORIGIN|g" \
-          oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
-        oc apply -f oc/01-with-deployment/071-Config-Map-Claw-Config.yaml
+          openshift/071-Config-Map-Claw-Config.yml
+        oc apply -f openshift/071-Config-Map-Claw-Config.yml
       fi
 
     - echo "Restarting deployment to pick up ConfigMap changes..."

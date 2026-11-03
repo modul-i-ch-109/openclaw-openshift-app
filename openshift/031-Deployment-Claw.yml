@@ -42,7 +42,7 @@ spec:
             - name: claw-home
               mountPath: /mnt/pvc
           terminationMessagePolicy: File
-          image: 'ghcr.io/openclaw/openclaw:2026.6.6'
+          image: 'ghcr.io/openclaw/openclaw:2026.10.9'
         - resources:
             limits:
               cpu: 200m
@@ -71,7 +71,72 @@ spec:
             - name: config
               mountPath: /config
           terminationMessagePolicy: File
-          image: 'ghcr.io/openclaw/openclaw:2026.6.6'
+          image: 'ghcr.io/openclaw/openclaw:2026.10.9'
+        - resources:
+            limits:
+              cpu: 500m
+              memory: 768Mi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          terminationMessagePath: /dev/termination-log
+          name: init-model-auth
+          command:
+            - sh
+            - '-c'
+            - |
+              # Deliberately no `set -e`: a failed registration (bad
+              # token format, expired token, etc.) must not block the
+              # pod from starting at all.
+              if [ -n "$ANTHROPIC_SETUP_TOKEN" ]; then
+                echo "[init-model-auth] registering Anthropic credential (trying API-key format first)..."
+                if echo "$ANTHROPIC_SETUP_TOKEN" | node /app/dist/index.js models auth paste-api-key --provider anthropic; then
+                  echo "[init-model-auth] Anthropic registered as an API key."
+                elif echo "$ANTHROPIC_SETUP_TOKEN" | node /app/dist/index.js models auth paste-token --provider anthropic; then
+                  echo "[init-model-auth] Anthropic registered as a setup-token."
+                else
+                  echo "[init-model-auth] WARNING: Anthropic registration failed in both API-key and token form, continuing anyway"
+                fi
+              else
+                echo "[init-model-auth] WARNING: ANTHROPIC_SETUP_TOKEN is not set - no model provider will be configured"
+              fi
+              exit 0
+          env:
+            - name: HOME
+              value: /home/node
+            - name: OPENCLAW_HOME
+              value: /home/node
+            - name: OPENCLAW_STATE_DIR
+              value: /home/node/.openclaw
+            - name: OPENCLAW_CONFIG_PATH
+              value: /home/node/.openclaw/openclaw.json
+            - name: ANTHROPIC_SETUP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: llm-key
+                  key: anthropic-setup-token
+                  optional: true
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            allowPrivilegeEscalation: false
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: claw-home
+              mountPath: /home/node/.openclaw
+              subPath: home
+            - name: claw-home
+              mountPath: /home/node/.local
+              subPath: home/.local
+            - name: claw-home
+              mountPath: /home/node/.cache
+              subPath: home/.cache
+            - name: claw-home
+              mountPath: /home/node/.config
+              subPath: home/.config
+          terminationMessagePolicy: File
+          image: 'ghcr.io/openclaw/openclaw:2026.10.9'
         - name: wait-for-proxy
           image: 'mirror.gcr.io/library/busybox:1.37'
           command:
@@ -284,7 +349,7 @@ spec:
               readOnly: true
               mountPath: /opt/kube-tools
           terminationMessagePolicy: File
-          image: 'ghcr.io/openclaw/openclaw:2026.6.6'
+          image: 'ghcr.io/openclaw/openclaw:2026.10.9'
       automountServiceAccountToken: true
       serviceAccount: default
       volumes:

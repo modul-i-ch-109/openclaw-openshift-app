@@ -10,4 +10,4 @@
 - Always reply in English, but prefer German for communication when possible
 - Short and precise – no unnecessary explanations
 - For errors: state the error and the solution directly
-- For successful deployments: short summary with deployed resources and route URL
+- For successful remediation: short summary with before/after values
